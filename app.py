@@ -103,7 +103,6 @@ def pagina_criar_lista():
 
     st.subheader("⚙️ Pipeline em execução")
 
-    # Contadores em tempo real
     cnt_col1, cnt_col2, cnt_col3, cnt_col4 = st.columns(4)
     cnt_aprovados   = cnt_col1.empty()
     cnt_descartados = cnt_col2.empty()
@@ -121,7 +120,6 @@ def pagina_criar_lista():
     def log_cb(msg: str):
         logs.append(msg)
         log_ph.markdown("```\n" + "\n".join(logs[-50:]) + "\n```")
-        # Atualiza contadores a partir do banco
         try:
             cont = db.contar_leads(lista_id)
             cnt_aprovados.metric("✅ Aprovados", cont["aprovados"])
@@ -236,25 +234,6 @@ def pagina_detalhe(lista_id: int):
     c3.metric("📌 Pedidos",     lista.get("requested_quantity", 0))
     c4.metric("📊 Status",      lista.get("status", "").title())
 
-    # Botão para marcar leads como abordados
-    st.markdown("---")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("📤 Marcar todos aprovados como Abordados",
-                     help="Move leads para a base global de abordadas"):
-            leads = db.get_leads_da_lista(lista_id, apenas_aprovados=True)
-            for l in leads:
-                db.inserir_abordada(
-                    nome=l["nome_imobiliaria"],
-                    cidade=l.get("cidade",""),
-                    lista_id=lista_id,
-                    cnpj=l.get("cnpj"),
-                    instagram_handle=l.get("instagram_handle"),
-                    site_url=l.get("site_url"),
-                )
-            st.success(f"{len(leads)} leads marcados como abordados.")
-            st.rerun()
-
     st.markdown("---")
     tab_aprov, tab_desc, tab_export = st.tabs([
         f"✅ Aprovados ({cont['aprovados']})",
@@ -270,10 +249,13 @@ def pagina_detalhe(lista_id: int):
         _tab_exportar(lista_id, lista["nome"])
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS DE FORMATAÇÃO
+# ══════════════════════════════════════════════════════════════════════════════
+
 def _valor_anuncio(lead: dict) -> str:
     google = bool(lead.get("advertise_google"))
-    meta = bool(lead.get("advertise_meta"))
-
+    meta   = bool(lead.get("advertise_meta"))
     if google and meta:
         return "Sim - Google e Meta"
     if google:
@@ -284,45 +266,44 @@ def _valor_anuncio(lead: dict) -> str:
 
 
 def _normalizar_whatsapp(lead: dict) -> str:
-    raw = (
-        lead.get("whatsapp_link")
-        or lead.get("telefone_raw")
-        or lead.get("telefone")
-        or ""
-    )
+    raw = (lead.get("whatsapp_link")
+           or lead.get("telefone_raw")
+           or "")
     if not raw:
         return ""
-
     digits = "".join(ch for ch in str(raw) if ch.isdigit())
     if not digits:
         return str(raw)
-
     if digits.startswith("55"):
         return f"https://wa.me/{digits}"
-
     if len(digits) in (10, 11):
         return f"https://wa.me/55{digits}"
-
     return f"https://wa.me/{digits}"
 
 
-def _formatar_lead(lead: dict, numero: int) -> dict:
+def _formatar_lead(lead: dict) -> dict:
+    """
+    Formato EXATO da planilha de prospecção de abril.
+    10 colunas, nada mais, nada menos.
+    """
     return {
-        "": numero,
         "Nome da imobiliária": lead.get("nome_imobiliaria") or "",
-        "Nome do contato": "",
-        "Material de valor": "GOOGLE",
-        "Email": lead.get("email") or "",
-        "WhatsApp": _normalizar_whatsapp(lead),
-        "Cidade": lead.get("cidade") or "",
-        "Instagram": lead.get("instagram_url") or "",
-        "Site": lead.get("site_url") or "",
-        "anúncia": _valor_anuncio(lead),
-        "padrão dos imóveis": "",
-        "CNPJ": lead.get("cnpj") or "",
-        "Responsável": lead.get("responsavel_principal") or "",
+        "Nome do contato":     lead.get("responsavel_principal") or "",
+        "Material de valor":   "GOOGLE",
+        "Email":               lead.get("email") or "",
+        "WhatsApp":            _normalizar_whatsapp(lead),
+        "Cidade":              lead.get("cidade") or "",
+        "Instagram":           lead.get("instagram_url") or "",
+        "Site":                lead.get("site_url") or "",
+        "anúncia":             _valor_anuncio(lead),
+        "Responsável":         lead.get("responsavel_principal") or "",
     }
-    
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TABS DE DETALHE
+# ══════════════════════════════════════════════════════════════════════════════
+
 def _tab_aprovados(lista_id: int):
     leads = db.get_leads_da_lista(lista_id, apenas_aprovados=True)
     if not leads:
@@ -348,10 +329,7 @@ def _tab_aprovados(lista_id: int):
                      if not l.get("advertise_meta") and not l.get("advertise_google")]
 
     st.markdown(f"**{len(filtrados)} leads**")
-    df = pd.DataFrame([
-    _formatar_lead(l, i + 1)
-    for i, l in enumerate(filtrados)
-    ])
+    df = pd.DataFrame([_formatar_lead(l) for l in filtrados])
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
@@ -363,21 +341,20 @@ def _tab_descartados(lista_id: int):
         return
 
     MOTIVOS_PT = {
-        "sem_site":             "Sem site",
-        "sem_instagram":        "Sem Instagram",
-        "poucos seguidores":    "Poucos seguidores",
-        "poucos posts":         "Poucos posts",
-        "inativo":              "Instagram inativo",
-        "perfil privado":       "Perfil privado",
-        "perfil não existe":    "Perfil não existe",
-        "nome da empresa não encontrado no perfil": "Nome ausente no perfil",
-        "data do último post não detectada": "Revisar manualmente",
+        "sem_site":          "Sem site",
+        "sem_instagram":     "Sem Instagram",
+        "poucos seguidores": "Poucos seguidores",
+        "poucos posts":      "Poucos posts",
+        "inativo":           "Instagram inativo",
+        "perfil privado":    "Perfil privado",
+        "perfil não existe": "Perfil não existe",
+        "nome da empresa":   "Nome ausente no perfil",
+        "data do último":    "Revisar manualmente",
     }
 
     por_motivo: dict = {}
     for l in descartados:
         m = l.get("discard_reason") or "outro"
-        # Simplifica o motivo para agrupamento
         m_simples = next((v for k, v in MOTIVOS_PT.items() if k in m), m)
         por_motivo.setdefault(m_simples, []).append(l)
 
@@ -398,10 +375,7 @@ def _tab_exportar(lista_id: int, nome_lista: str):
         st.warning("Sem leads aprovados para exportar.")
         return
 
-    df = pd.DataFrame([
-    _formatar_lead(l, i + 1)
-    for i, l in enumerate(leads)
-    ])
+    df = pd.DataFrame([_formatar_lead(l) for l in leads])
 
     col1, col2 = st.columns(2)
     with col1:
@@ -409,14 +383,18 @@ def _tab_exportar(lista_id: int, nome_lista: str):
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
             df.to_excel(w, index=False, sheet_name="Leads")
         buf.seek(0)
-        st.download_button("⬇️ Excel", data=buf,
-                           file_name=f"{nome_arq}_{date.today()}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button(
+            "⬇️ Excel", data=buf,
+            file_name=f"{nome_arq}_{date.today()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
     with col2:
         csv = df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("⬇️ CSV", data=csv,
-                           file_name=f"{nome_arq}_{date.today()}.csv",
-                           mime="text/csv")
+        st.download_button(
+            "⬇️ CSV", data=csv,
+            file_name=f"{nome_arq}_{date.today()}.csv",
+            mime="text/csv"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -437,10 +415,10 @@ def pagina_bases():
             st.markdown(f"**{len(reprov)} empresas**")
             df = pd.DataFrame([{
                 "Nome":   r["nome_imobiliaria"],
-                "Cidade": r.get("cidade",""),
-                "CNPJ":   r.get("cnpj","") or "—",
-                "Motivo": r.get("motivo",""),
-                "Data":   r.get("created_at","")[:10],
+                "Cidade": r.get("cidade", ""),
+                "CNPJ":   r.get("cnpj", "") or "—",
+                "Motivo": r.get("motivo", ""),
+                "Data":   r.get("created_at", "")[:10],
             } for r in reprov])
             st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -454,22 +432,22 @@ def pagina_bases():
             st.markdown(f"**{len(abord)} empresas**")
             df2 = pd.DataFrame([{
                 "Nome":        a["nome_imobiliaria"],
-                "Cidade":      a.get("cidade",""),
-                "CNPJ":        a.get("cnpj","") or "—",
-                "Instagram":   a.get("instagram_handle","") or "—",
-                "Abordada em": a.get("data_abordagem","") or "—",
+                "Cidade":      a.get("cidade", ""),
+                "CNPJ":        a.get("cnpj", "") or "—",
+                "Instagram":   a.get("instagram_handle", "") or "—",
+                "Abordada em": a.get("data_abordagem", "") or "—",
             } for a in abord])
             st.dataframe(df2, use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# EXPORTAR
+# EXPORTAR (global)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def pagina_exportar():
     st.title("📥 Exportar")
     listas = [l for l in db.listar_listas()
-              if l["status"] in ("concluida","esgotada")]
+              if l["status"] in ("concluida", "esgotada")]
     if not listas:
         st.info("Nenhuma lista disponível.")
         return
@@ -503,7 +481,7 @@ def pagina_config():
     with c3:
         st.metric("UFs vazias p/ esgotamento", UFS_VAZIAS_PARA_ESGOTAR)
 
-    st.info("Para alterar qualquer critério, edite `config.py` ou "
+    st.info("Para alterar critérios, edite `config.py`, "
             "`agents/enrichment_agent.py` ou `pipeline.py` diretamente.")
     st.markdown("---")
     st.subheader("🗄️ Banco")
