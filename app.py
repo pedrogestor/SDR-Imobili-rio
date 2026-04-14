@@ -281,11 +281,44 @@ def _normalizar_whatsapp(lead: dict) -> str:
     return f"https://wa.me/{digits}"
 
 
+def _get_review_flags(lead: dict) -> list:
+    """Extrai flags de revisão do raw_debug_json."""
+    import json as _json
+    raw = lead.get("raw_debug_json") or {}
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            raw = {}
+    return raw.get("review_flags") or []
+
+
+def _observacoes(lead: dict) -> str:
+    """Gera texto de observação a partir das flags de revisão."""
+    flags = _get_review_flags(lead)
+    if not flags:
+        return ""
+    msgs = []
+    for f in flags:
+        if f.startswith("site:score_baixo"):
+            msgs.append("Site: verificar manualmente (aprovado por margem)")
+        elif f == "ig:data_nao_detectada":
+            msgs.append("Instagram: data do último post não verificada")
+        elif f == "ig:seguidores_nao_verificados":
+            msgs.append("Instagram: seguidores não extraídos")
+        elif f == "ig:sem_reciprocidade":
+            msgs.append("Instagram: sem link recíproco com o site")
+        else:
+            msgs.append(f)
+    return " | ".join(msgs)
+
+
 def _formatar_lead(lead: dict) -> dict:
     """
-    Formato EXATO da planilha de prospecção de abril.
-    10 colunas, nada mais, nada menos.
+    Formato da planilha de prospecção.
+    12 colunas: 10 originais + CNPJ + Observações.
     """
+    obs = _observacoes(lead)
     return {
         "Nome da imobiliária": lead.get("nome_imobiliaria") or "",
         "Nome do contato":     lead.get("responsavel_principal") or "",
@@ -297,6 +330,8 @@ def _formatar_lead(lead: dict) -> dict:
         "Site":                lead.get("site_url") or "",
         "anúncia":             _valor_anuncio(lead),
         "Responsável":         lead.get("responsavel_principal") or "",
+        "CNPJ":                lead.get("cnpj") or "",
+        "Observações":         obs,
     }
 
 
@@ -328,6 +363,9 @@ def _tab_aprovados(lista_id: int):
         filtrados = [l for l in filtrados
                      if not l.get("advertise_meta") and not l.get("advertise_google")]
 
+    n_flags = sum(1 for l in filtrados if _get_review_flags(l))
+    if n_flags > 0:
+        st.warning(f"⚠️ {n_flags} lead(s) com observações — verifique a coluna 'Observações'")
     st.markdown(f"**{len(filtrados)} leads**")
     df = pd.DataFrame([_formatar_lead(l) for l in filtrados])
     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -382,6 +420,32 @@ def _tab_exportar(lista_id: int, nome_lista: str):
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
             df.to_excel(w, index=False, sheet_name="Leads")
+            # ── Coloring para revisão manual ──────────────────────────────
+            try:
+                from openpyxl.styles import PatternFill, Font
+                ws = w.sheets["Leads"]
+                AMARELO = PatternFill(start_color="FFF3CD",
+                                      end_color="FFF3CD", fill_type="solid")
+                FONTE_OBS = Font(color="856404", bold=True)
+                # Mapeia nome de coluna → índice (1-based)
+                headers = {cell.value: cell.column for cell in ws[1]}
+                col_ig  = headers.get("Instagram")
+                col_sit = headers.get("Site")
+                col_obs = headers.get("Observações")
+
+                for row_idx, lead in enumerate(leads, start=2):
+                    flags = _get_review_flags(lead)
+                    ig_flags   = [f for f in flags if f.startswith("ig:")]
+                    site_flags = [f for f in flags if f.startswith("site:")]
+                    if ig_flags and col_ig:
+                        ws.cell(row=row_idx, column=col_ig).fill = AMARELO
+                    if site_flags and col_sit:
+                        ws.cell(row=row_idx, column=col_sit).fill = AMARELO
+                    if flags and col_obs:
+                        ws.cell(row=row_idx, column=col_obs).fill = AMARELO
+                        ws.cell(row=row_idx, column=col_obs).font = FONTE_OBS
+            except Exception:
+                pass  # coloring é cosmético, não bloqueia exportação
         buf.seek(0)
         st.download_button(
             "⬇️ Excel", data=buf,

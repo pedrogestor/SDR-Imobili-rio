@@ -81,6 +81,8 @@ def gerar_candidatos(vistos_cnpjs: set = None, log_cb=None):
                     continue
                 situacao = emp.get("descricao_situacao_cadastral", "").upper()
                 if situacao and situacao != "ATIVA":
+                    # CNPJ inativo/baixado — descartado silenciosamente
+                    # (log só no modo debug para não poluir o output)
                     continue
 
                 vistos_cnpjs.add(cnpj)
