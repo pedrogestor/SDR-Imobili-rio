@@ -1,13 +1,6 @@
 """
 agents/enrichment_agent.py — Enriquecimento de site + Instagram.
-v11.1 — Pipeline progressivo de resolução de identidade.
-
-Mudanças v11.1:
-- Sinais fortes de site: title, h1, og:site_name, link IG
-- Cidade SP/RJ tratada como ambígua (downweight + UF na query)
-- Origem do Instagram com pesos: site_validado > site_html > google
-- Instagram vindo só do Google exige reciprocidade para aprovar
-- Top 2 candidatos por etapa (era 5)
+v11.3-ddg — mesma lógica da v11_3, trocando Google por DuckDuckGo na descoberta.
 """
 
 import re, time, requests
@@ -20,8 +13,8 @@ MIN_SEGUIDORES      = 500
 MIN_POSTS           = 20
 MAX_SEMANAS_INATIVO = 8
 
-MAX_TENTATIVAS_SITE = 2   # v11.1: era 5
-MAX_TENTATIVAS_IG   = 2   # v11.1: era 5
+MAX_TENTATIVAS_SITE = 2
+MAX_TENTATIVAS_IG   = 2
 
 TIMEOUT_PAGINA = 10
 
@@ -79,37 +72,28 @@ class ResultadoEnriquecimento:
     sem_instagram:      bool = False
     motivo_rejeicao_ig: str  = None
     erro:               str  = None
-    review_flags:       list = None   # flags para revisão manual
+    review_flags:       list = None
 
     def __post_init__(self):
-        if self.site_sinais  is None: self.site_sinais  = []
-        if self.review_flags is None: self.review_flags = []
-
-
-# ── Normalização ──────────────────────────────────────────────────────────────
+        if self.site_sinais is None:
+            self.site_sinais = []
+        if self.review_flags is None:
+            self.review_flags = []
 
 
 def _extrair_nome_display_ig(html: str) -> str | None:
-    """
-    Extrai o nome de exibição do perfil Instagram.
-    og:title geralmente contém: "Display Name (@handle) • Instagram photos..."
-    Fallback: full_name no JSON embutido.
-    """
-    # og:title
     for pat in [
-        r'property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
-        r'content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+        r'property=["\\\']og:title["\\\'][^>]+content=["\\\']([^"\\\']+)["\\\']',
+        r'content=["\\\']([^"\\\']+)["\\\'][^>]+property=["\\\']og:title["\\\']',
     ]:
         m = re.search(pat, html, re.IGNORECASE)
         if m:
             title = m.group(1)
-            # Remove " (@handle) • Instagram..."
             display = re.sub(r'\s*\(@[^)]+\).*', '', title).strip()
             display = re.sub(r'\s*•.*', '', display).strip()
             if display and len(display) > 2:
                 return display
 
-    # JSON embutido
     m = re.search(r'"full_name"\s*:\s*"([^"]+)"', html)
     if m:
         try:
@@ -117,83 +101,60 @@ def _extrair_nome_display_ig(html: str) -> str | None:
             return codecs.decode(m.group(1).replace('\\u', '\\u'), 'unicode_escape')
         except Exception:
             return m.group(1)
-
     return None
 
 
 def _nomes_compatíveis(nome_empresa: str, nome_perfil: str) -> bool:
-    """
-    Verifica se o nome do perfil é compatível com o nome da empresa.
-    Retorna True se há pelo menos 1 palavra significativa em comum.
-    Tratamento especial para acrônimos (3-4 chars): exige match exato.
-    """
-    palavras_emp    = set(_palavras(nome_empresa))
+    palavras_emp = set(_palavras(nome_empresa))
     palavras_perfil = set(_palavras(nome_perfil))
 
     if not palavras_emp or not palavras_perfil:
-        return False  # não dá pra comparar
+        return False
 
-    # Intersecção direta
     if palavras_emp & palavras_perfil:
         return True
 
-    # Verifica acrônimos: se a empresa tem nome curto (tipo "LDL", "MGF"),
-    # checa se o acrônimo aparece no nome do perfil ou vice-versa
     for p_emp in palavras_emp:
-        if len(p_emp) <= 4:  # provável acrônimo
-            if p_emp in _norm(nome_perfil).replace(" ", ""):
-                return True
+        if len(p_emp) <= 4 and p_emp in _norm(nome_perfil).replace(" ", ""):
+            return True
 
     for p_perf in palavras_perfil:
-        if len(p_perf) <= 4:
-            if p_perf in _norm(nome_empresa).replace(" ", ""):
-                return True
+        if len(p_perf) <= 4 and p_perf in _norm(nome_empresa).replace(" ", ""):
+            return True
 
     return False
 
-# ── Detecção de cidade errada ─────────────────────────────────────────────────
 
 def _extrair_cidade_do_perfil_ig(html: str) -> str | None:
-    """
-    Extrai a cidade do endereço do perfil Instagram.
-    O Instagram exibe no meta description: "..., CityName, Brazil ZIPCODE"
-    ou no corpo da página como parte do endereço.
-    """
-    # Padrão meta description do Instagram
     meta_m = re.search(
-        r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
-        html, re.IGNORECASE)
+        r'<meta[^>]+name=["\\\']description["\\\'][^>]+content=["\\\']([^"\\\']+)["\\\']',
+        html, re.IGNORECASE
+    )
     if meta_m:
         desc = meta_m.group(1)
-        # Padrão: "endereço, Cidade, Brazil CEPXXX"
         city_m = re.search(
             r',\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{2,30}),\s*(?:Brazil|Brasil)',
-            desc)
+            desc
+        )
         if city_m:
             return city_m.group(1).strip()
-    # Fallback: procura o padrão no HTML completo
+
     city_m2 = re.search(
         r'([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s]{2,30}),\s*(?:Brazil|Brasil)\s*(?:\d{5}|<)',
-        html)
+        html
+    )
     if city_m2:
         return city_m2.group(1).strip()
     return None
 
 
 def _cidade_conflito(cidade_encontrada: str, cidade_esperada: str) -> bool:
-    """
-    Retorna True se as cidades são claramente diferentes.
-    Leva em conta que Barueri é cidade diferente de São Paulo,
-    mesmo estando na mesma região metropolitana.
-    """
     if not cidade_encontrada:
         return False
-    norm_enc  = _norm(cidade_encontrada).replace(" ", "")
-    norm_esp  = _norm(cidade_esperada).replace(" ", "")
-    # Mesmo nome normalizado → sem conflito
+    norm_enc = _norm(cidade_encontrada).replace(" ", "")
+    norm_esp = _norm(cidade_esperada).replace(" ", "")
     if norm_enc == norm_esp:
         return False
-    # Um contém o outro (ex: "São Paulo" e "São Paulo SP") → sem conflito
     if norm_enc in norm_esp or norm_esp in norm_enc:
         return False
     return True
@@ -203,6 +164,7 @@ def _norm(s: str) -> str:
     import unicodedata
     s = unicodedata.normalize("NFKD", (s or "").lower())
     return "".join(c for c in s if not unicodedata.combining(c))
+
 
 def _palavras(nome: str) -> list:
     ignorar = {
@@ -214,26 +176,26 @@ def _palavras(nome: str) -> list:
     return [p for p in re.split(r'\W+', _norm(nome))
             if len(p) > 1 and p not in ignorar]
 
+
 def _dominio_simples(url: str) -> str | None:
     try:
-        d = urlparse(url if url.startswith("http") else "https://"+url).netloc
+        d = urlparse(url if url.startswith("http") else "https://" + url).netloc
         return d.lower().replace("www.", "") or None
     except Exception:
         return None
 
+
 def _cidade_query(cidade: str) -> str:
-    """Para SP e RJ adiciona UF na query do Google para evitar ambiguidade."""
     cidade_norm = _norm(cidade).replace(" ", "")
     uf = CIDADES_AMBIGUAS.get(cidade_norm)
     if uf:
         return f"{cidade} {uf}"
     return cidade
 
+
 def _cidade_e_ambigua(cidade: str) -> bool:
     return _norm(cidade).replace(" ", "") in CIDADES_AMBIGUAS
 
-
-# ── Selenium ──────────────────────────────────────────────────────────────────
 
 def criar_driver():
     from selenium import webdriver
@@ -251,45 +213,81 @@ def criar_driver():
     opts.add_argument("--window-size=1280,900")
     opts.add_argument(f"user-agent={HEADERS['User-Agent']}")
     service = Service(ChromeDriverManager().install())
-    driver  = webdriver.Chrome(service=service, options=opts)
+    driver = webdriver.Chrome(service=service, options=opts)
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
     return driver
 
 
-def _buscar_google(driver, query: str, n: int = 10) -> list:
-    url = (f"https://www.google.com.br/search?q={quote(query)}"
-           f"&hl=pt-BR&gl=br&num={n}")
+def _resolver_url_ddg(url: str) -> str | None:
+    from urllib.parse import parse_qs, unquote
+
+    if not url:
+        return None
+
+    if url.startswith("//"):
+        url = "https:" + url
+    elif url.startswith("/"):
+        url = "https://duckduckgo.com" + url
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+
+    if "duckduckgo.com" in (parsed.netloc or "") and parsed.path.startswith("/l/"):
+        qs = parse_qs(parsed.query or "")
+        uddg = qs.get("uddg", [None])[0]
+        if uddg:
+            return unquote(uddg)
+        return None
+
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return url
+
+    return None
+
+
+def _buscar_duckduckgo(driver, query: str, n: int = 10) -> list:
+    url = f"https://duckduckgo.com/html/?q={quote(query)}&kl=br-pt"
     driver.get(url)
-    time.sleep(2.5)
+    time.sleep(2.0)
     html = driver.page_source
 
     urls, vistos = [], set()
-    for u in re.findall(r'/url\?q=(https?://[^&"]{10,200})', html):
-        u = u.split("&")[0]
-        d = urlparse(u).netloc
-        if d and d not in vistos and "google" not in d:
-            vistos.add(d); urls.append(u)
-    for u in re.findall(
-            r'href="(https?://(?!(?:www\.)?google)[^"]{10,200})"', html):
-        d = urlparse(u).netloc
-        if d and d not in vistos:
-            vistos.add(d); urls.append(u)
+
+    padroes = [
+        r'class="result__a"[^>]+href="([^"]+)"',
+        r'nofollow" class="result__a" href="([^"]+)"',
+        r'<a[^>]+href="([^"]+)"[^>]*class="[^"]*result__a[^"]*"',
+    ]
+
+    for padrao in padroes:
+        for bruto in re.findall(padrao, html, flags=re.IGNORECASE):
+            final = _resolver_url_ddg(bruto)
+            if not final:
+                continue
+
+            dom = urlparse(final).netloc.lower()
+            if not dom or "duckduckgo.com" in dom:
+                continue
+
+            if final not in vistos:
+                vistos.add(final)
+                urls.append(final)
+            if len(urls) >= n:
+                return urls[:n]
+
     return urls[:n]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SITE — pontuação de URL + verificação profunda
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _pontuar_site(url: str, nome: str, cidade: str) -> int:
-    """Score barato de URL — sem fazer request. Só analisa a URL."""
     dominio = urlparse(url).netloc.lower().replace("www.", "")
-    path    = urlparse(url).path.lower()
+    path = urlparse(url).path.lower()
 
     if "instagram.com" in dominio:
-        return -1  # sinaliza Instagram, tratado separadamente
+        return -1
 
     for p in PORTAIS:
         if p in dominio:
@@ -300,12 +298,11 @@ def _pontuar_site(url: str, nome: str, cidade: str) -> int:
     if any(x in dominio for x in ["gstatic","cloudfront","amazonaws","cdn"]):
         return 0
 
-    score    = 0
+    score = 0
     palavras = _palavras(nome)
-    hits     = sum(1 for p in palavras if p in dominio)
-    score   += hits * 3
+    hits = sum(1 for p in palavras if p in dominio)
+    score += hits * 3
 
-    # Cidade no domínio — SP e RJ são ambíguas, não pontuar
     if not _cidade_e_ambigua(cidade):
         if _norm(cidade).replace(" ","")[:5] in dominio:
             score += 1
@@ -319,16 +316,9 @@ def _pontuar_site(url: str, nome: str, cidade: str) -> int:
 
 
 def _verificar_site(url: str, nome: str, cidade: str) -> dict:
-    """
-    Verificação profunda do site via requests.
-    v11.1: distingue sinais fortes (title, h1, og:site_name, link IG)
-    de sinais médios. Exige pelo menos 1 sinal forte para aprovar.
-    """
-    vazio = {"ok": False, "score": 0, "motivo": "",
-             "sinais_fortes": [], "ig_link": None}
+    vazio = {"ok": False, "score": 0, "motivo": "", "sinais_fortes": [], "ig_link": None}
     try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT_PAGINA,
-                         allow_redirects=True)
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT_PAGINA, allow_redirects=True)
         if r.status_code >= 400:
             return {**vazio, "motivo": f"HTTP {r.status_code}"}
 
@@ -337,26 +327,21 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
             if p in dom_final:
                 return {**vazio, "motivo": f"redirecionou para portal ({p})"}
 
-        html      = r.text
-        html_l    = html.lower()
-        palavras  = _palavras(nome)
-        score     = 0
+        html = r.text
+        html_l = html.lower()
+        palavras = _palavras(nome)
+        score = 0
         sinais_fortes = []
         sinais_medios = []
-        ig_link       = None
+        ig_link = None
 
-        # ── SINAIS FORTES (cada um vale muito) ───────────────────────────
-
-        # Título da página
-        title_m = re.search(r'<title[^>]*>([^<]{2,120})</title>',
-                             html, re.IGNORECASE)
+        title_m = re.search(r'<title[^>]*>([^<]{2,120})</title>', html, re.IGNORECASE)
         if title_m:
             title_norm = _norm(title_m.group(1))
             if sum(1 for p in palavras if p in title_norm) >= 1:
                 score += 20
                 sinais_fortes.append("nome no <title>")
 
-        # H1
         h1_m = re.search(r'<h1[^>]*>([^<]{2,120})</h1>', html, re.IGNORECASE)
         if h1_m:
             h1_norm = _norm(h1_m.group(1))
@@ -364,11 +349,10 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
                 score += 15
                 sinais_fortes.append("nome no <h1>")
 
-        # og:title — verifica se pertence a outra empresa
         ogtitle_m = None
         for pat in [
-            r'property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
-            r'content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+            r'property=["\\\']og:title["\\\'][^>]+content=["\\\']([^"\\\']+)["\\\']',
+            r'content=["\\\']([^"\\\']+)["\\\'][^>]+property=["\\\']og:title["\\\']',
         ]:
             ogtitle_m = re.search(pat, html, re.IGNORECASE)
             if ogtitle_m:
@@ -376,18 +360,15 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
         if ogtitle_m:
             ogtitle_norm = _norm(ogtitle_m.group(1))
             palavras_titulo = set(re.split(r'\W+', ogtitle_norm)) - {"", "de", "da", "do", "e"}
-            palavras_emp    = set(_palavras(nome))
-            # Se og:title tem palavras e NENHUMA bate com a empresa → sinal negativo forte
+            palavras_emp = set(_palavras(nome))
             if len(palavras_titulo) >= 2 and len(palavras_emp) >= 1:
                 if not (palavras_titulo & palavras_emp):
-                    # Outro negócio no og:title — penalidade severa
                     score -= 20
                     sinais_medios.append("og:title incompatível")
 
-        # og:site_name
         for pat in [
-            r'property=["\']og:site_name["\'][^>]+content=["\']([^"\']{2,80})["\']',
-            r'content=["\']([^"\']{2,80})["\'][^>]+property=["\']og:site_name["\']',
+            r'property=["\\\']og:site_name["\\\'][^>]+content=["\\\']([^"\\\']{2,80})["\\\']',
+            r'content=["\\\']([^"\\\']{2,80})["\\\'][^>]+property=["\\\']og:site_name["\\\']',
         ]:
             og_m = re.search(pat, html, re.IGNORECASE)
             if og_m:
@@ -397,20 +378,16 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
                     sinais_fortes.append("og:site_name")
                 break
 
-        # Link explícito para Instagram (evidência de reciprocidade)
         ig_m = re.search(r'instagram\.com/([a-zA-Z0-9_\.]{3,30})/?', html)
         if ig_m:
             h = ig_m.group(1).lower()
             if h not in IGNORAR_IG:
                 ig_link = h
-                score  += 10
+                score += 10
                 sinais_fortes.append(f"link IG @{h}")
 
-        # ── CONFLITO DE CIDADE no título/h1 (rejeição imediata) ──────────
-        # Se o título ou h1 menciona explicitamente outra cidade → não é o site
         if title_m:
             title_txt = title_m.group(1)
-            # Procura padrão "Cidade - Empresa" ou "Empresa | Cidade"
             from config import CIDADES_POPULACAO
             cidade_norm_esp = _norm(cidade).replace(" ", "")
             for cid_conhecida in CIDADES_POPULACAO:
@@ -418,16 +395,12 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
                 if cid_norm == cidade_norm_esp or len(cid_norm) < 4:
                     continue
                 if cid_norm in _norm(title_txt):
-                    # Outra cidade no título — rejeita
                     return {
                         "ok": False, "score": 0, "ig_link": ig_link,
                         "sinais_fortes": sinais_fortes,
                         "motivo": f"cidade incorreta no título: {cid_conhecida} ≠ {cidade}",
                     }
 
-        # ── SINAIS MÉDIOS ─────────────────────────────────────────────────
-
-        # Nome no corpo HTML (mais fraco que meta tags)
         hits_nome = sum(1 for p in palavras if p in html_l)
         if hits_nome >= 2:
             score += 10
@@ -436,18 +409,16 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
             score += 5
             sinais_medios.append("nome HTML (1×)")
 
-        # Cidade — downweight para SP/RJ (aparece em todo site do estado)
-        cidade_norm  = _norm(cidade)
+        cidade_norm = _norm(cidade)
         cidade_no_html = cidade_norm in _norm(html)
         if cidade_no_html:
             if _cidade_e_ambigua(cidade):
-                score += 2   # sinal fraco — quase qualquer site de SP/RJ vai ter
+                score += 2
                 sinais_medios.append("cidade (ambígua)")
             else:
                 score += 8
                 sinais_medios.append("cidade")
 
-        # Termos imobiliários
         hits_imob = sum(1 for t in TERMOS_IMOB if t in html_l)
         if hits_imob >= 3:
             score += 6
@@ -455,8 +426,6 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
         elif hits_imob >= 1:
             score += 3
 
-        # ── REGRA DE APROVAÇÃO ────────────────────────────────────────────
-        # Exige pelo menos 1 sinal forte + score mínimo
         tem_forte = len(sinais_fortes) > 0
 
         if not tem_forte:
@@ -484,31 +453,16 @@ def _verificar_site(url: str, nome: str, cidade: str) -> dict:
         return {**vazio, "motivo": str(e)[:60]}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# INSTAGRAM — pontuação de handle + verificação completa
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _pontuar_ig(handle: str, nome: str, cidade: str,
-                origem: str = "google_ig") -> int:
-    """
-    Score barato de handle — sem fazer request.
-    Origem afeta o bônus base:
-      site_validado / site_html → +8 (alta confiança)
-      resultado_site            → +3 (média confiança)
-      google_ig                 → 0  (baixa confiança)
-    """
+def _pontuar_ig(handle: str, nome: str, cidade: str, origem: str = "google_ig") -> int:
     if handle in IGNORAR_IG or len(handle) < 3:
         return 0
-    h        = handle.lower()
+    h = handle.lower()
     palavras = _palavras(nome)
-    score    = 0
+    score = 0
 
     hits = sum(1 for p in palavras if p in h)
 
     if hits == 0 and len(palavras) >= 1:
-        # Handle não tem nenhuma palavra do nome da empresa.
-        # Termos genéricos (imob, corretor) não bastam sozinhos.
-        # Penalidade forte — só bônus de origem muito alto salva.
         score -= 6
     else:
         score += hits * 3
@@ -526,30 +480,22 @@ def _pontuar_ig(handle: str, nome: str, cidade: str,
     if len(h) < 5:
         score -= 2
 
-    # Bônus por origem
-    bonus = {"site_validado": 8, "site_html": 8,
-             "resultado_site": 3, "google_ig": 0}
+    bonus = {"site_validado": 8, "site_html": 8, "resultado_site": 3, "google_ig": 0}
     score += bonus.get(origem, 0)
 
     return max(score, 0)
 
 
-def _verificar_instagram_completo(driver, handle: str,
-                                   nome: str, cidade: str,
-                                   site_url: str = None) -> dict:
-    """
-    Verificação Selenium do perfil.
-    v11.1: verifica reciprocidade (bio aponta para site validado).
-    """
+def _verificar_instagram_completo(driver, handle: str, nome: str, cidade: str, site_url: str = None) -> dict:
     url = f"https://www.instagram.com/{handle}/"
     resultado = {
-        "aprovado":    False,
-        "motivo":      None,
-        "seguidores":  None,
-        "num_posts":   None,
+        "aprovado": False,
+        "motivo": None,
+        "seguidores": None,
+        "num_posts": None,
         "ultimo_post": None,
-        "semanas":     None,
-        "reciproco":   False,
+        "semanas": None,
+        "reciproco": False,
     }
 
     try:
@@ -568,71 +514,51 @@ def _verificar_instagram_completo(driver, handle: str,
             resultado["motivo"] = "perfil privado"
             return resultado
 
-        # ── Verifica nome de exibição do perfil (v11.3) ─────────────────
-        # Este é o check mais robusto: compara o nome visível do perfil
-        # com o nome da empresa. "MGF Imóveis" ≠ "LDL Imóveis" → rejeita.
         nome_display = _extrair_nome_display_ig(html)
-        if nome_display:
-            if not _nomes_compatíveis(nome, nome_display):
-                resultado["motivo"] = (
-                    f"nome do perfil incompatível: "
-                    f"'{nome_display}' ≠ '{nome}'")
-                return resultado
+        if nome_display and not _nomes_compatíveis(nome, nome_display):
+            resultado["motivo"] = f"nome do perfil incompatível: '{nome_display}' ≠ '{nome}'"
+            return resultado
 
-        # ── Verifica reciprocidade ────────────────────────────────────────
         if site_url:
             dom_site = _dominio_simples(site_url)
             if dom_site and dom_site in html.lower():
                 resultado["reciproco"] = True
 
-        # ── Verifica conflito de cidade (v11.2) ───────────────────────────
         cidade_perfil = _extrair_cidade_do_perfil_ig(html)
         if cidade_perfil and _cidade_conflito(cidade_perfil, cidade):
-            resultado["motivo"] = (
-                f"cidade incorreta no perfil: {cidade_perfil} ≠ {cidade}")
+            resultado["motivo"] = f"cidade incorreta no perfil: {cidade_perfil} ≠ {cidade}"
             return resultado
 
-        # ── Extrai seguidores e posts ─────────────────────────────────────
-        # Método 1: meta description
         meta_m = re.search(
-            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\\\']description["\\\'][^>]+content=["\\\']([^"\\\']+)["\\\']',
             html, re.IGNORECASE)
         if meta_m:
-            desc  = meta_m.group(1)
-            seg_m = re.search(
-                r'([\d,\.]+\s*(?:mil|k)?)\s*(?:seguidores|followers)',
-                desc, re.IGNORECASE)
-            pos_m = re.search(
-                r'([\d,\.]+\s*(?:mil|k)?)\s*(?:publicações|posts)',
-                desc, re.IGNORECASE)
+            desc = meta_m.group(1)
+            seg_m = re.search(r'([\d,\.]+\s*(?:mil|k)?)\s*(?:seguidores|followers)', desc, re.IGNORECASE)
+            pos_m = re.search(r'([\d,\.]+\s*(?:mil|k)?)\s*(?:publicações|posts)', desc, re.IGNORECASE)
             if seg_m:
                 resultado["seguidores"] = _parse_numero(seg_m.group(1))
             if pos_m:
                 resultado["num_posts"] = _parse_numero(pos_m.group(1))
 
-        # Método 2: JSON embutido
         if resultado["seguidores"] is None:
-            for pat in [r'"edge_followed_by":\{"count":(\d+)\}',
-                        r'"follower_count":(\d+)', r'"followers":(\d+)']:
+            for pat in [r'"edge_followed_by":\{"count":(\d+)\}', r'"follower_count":(\d+)', r'"followers":(\d+)']:
                 m = re.search(pat, html)
                 if m:
                     resultado["seguidores"] = int(m.group(1))
                     break
 
         if resultado["num_posts"] is None:
-            for pat in [r'"edge_owner_to_timeline_media":\{"count":(\d+)',
-                        r'"media_count":(\d+)']:
+            for pat in [r'"edge_owner_to_timeline_media":\{"count":(\d+)', r'"media_count":(\d+)']:
                 m = re.search(pat, html)
                 if m:
                     resultado["num_posts"] = int(m.group(1))
                     break
 
-        # Método 3: elementos Selenium com contexto
         if resultado["seguidores"] is None or resultado["num_posts"] is None:
             try:
                 from selenium.webdriver.common.by import By
-                stat_links = driver.find_elements(
-                    By.CSS_SELECTOR, "ul li, section ul li")
+                stat_links = driver.find_elements(By.CSS_SELECTOR, "ul li, section ul li")
                 for li in stat_links[:6]:
                     texto_li = (li.text or "").lower().strip()
                     m_num = re.search(r'([\d\.,]+)', texto_li)
@@ -647,36 +573,10 @@ def _verificar_instagram_completo(driver, handle: str,
                     elif any(p in texto_li for p in ["seguidor","follower"]):
                         if resultado["seguidores"] is None:
                             resultado["seguidores"] = num
-
-                # Fallback com contexto do li pai
-                if resultado["seguidores"] is None or resultado["num_posts"] is None:
-                    spans = driver.find_elements(
-                        By.CSS_SELECTOR,
-                        "header section ul li span[class*='x5n08af'], "
-                        "header section ul li span span")
-                    for span in spans[:9]:
-                        txt = (span.text or "").strip()
-                        txt_l = txt.replace(".", "").replace(",", "")
-                        if not txt_l.isdigit():
-                            continue
-                        try:
-                            li_pai = driver.execute_script(
-                                "return arguments[0].closest('li')", span)
-                            ctx = (li_pai.text or "").lower() if li_pai else ""
-                        except Exception:
-                            ctx = ""
-                        num = int(txt_l)
-                        if "publicaç" in ctx or "post" in ctx:
-                            if resultado["num_posts"] is None:
-                                resultado["num_posts"] = num
-                        elif "seguidor" in ctx or "follower" in ctx:
-                            if resultado["seguidores"] is None:
-                                resultado["seguidores"] = num
             except Exception:
                 pass
 
-        # ── Valida critérios mínimos ──────────────────────────────────────
-        seg   = resultado["seguidores"]
+        seg = resultado["seguidores"]
         posts = resultado["num_posts"]
 
         if seg is not None and seg < MIN_SEGUIDORES:
@@ -687,19 +587,16 @@ def _verificar_instagram_completo(driver, handle: str,
             resultado["motivo"] = f"poucos posts ({posts} < {MIN_POSTS})"
             return resultado
 
-        # ── Último post não fixado ────────────────────────────────────────
         data_ultimo = _extrair_data_ultimo_post_nao_fixado(driver, html)
         resultado["ultimo_post"] = data_ultimo
 
         if data_ultimo:
             try:
-                dt      = date.fromisoformat(data_ultimo)
+                dt = date.fromisoformat(data_ultimo)
                 semanas = (date.today() - dt).days // 7
                 resultado["semanas"] = semanas
                 if semanas > MAX_SEMANAS_INATIVO:
-                    resultado["motivo"] = (
-                        f"inativo — último post há {semanas} semanas "
-                        f"(máx {MAX_SEMANAS_INATIVO})")
+                    resultado["motivo"] = f"inativo — último post há {semanas} semanas (máx {MAX_SEMANAS_INATIVO})"
                     return resultado
             except Exception:
                 pass
@@ -708,9 +605,8 @@ def _verificar_instagram_completo(driver, handle: str,
             resultado["aprovado"] = True
             return resultado
 
-        # ── Nome da empresa no perfil ─────────────────────────────────────
-        html_l    = html.lower()
-        palavras  = _palavras(nome)
+        html_l = html.lower()
+        palavras = _palavras(nome)
         hits_nome = sum(1 for p in palavras if p in html_l)
         if hits_nome < 1:
             resultado["motivo"] = "nome da empresa não encontrado no perfil"
@@ -725,10 +621,6 @@ def _verificar_instagram_completo(driver, handle: str,
 
 
 def _extrair_data_ultimo_post_nao_fixado(driver, html: str) -> str | None:
-    """
-    Detecta post fixado por comparação de datas dos 4 primeiros posts.
-    Se post 1 for mais antigo que qualquer dos posts 2-4, é fixado.
-    """
     try:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
@@ -736,13 +628,13 @@ def _extrair_data_ultimo_post_nao_fixado(driver, html: str) -> str | None:
 
         time.sleep(1.5)
 
-        posts = driver.find_elements(
-            By.CSS_SELECTOR, "article a[href*='/p/'], a[href*='/p/']")
+        posts = driver.find_elements(By.CSS_SELECTOR, "article a[href*='/p/'], a[href*='/p/']")
         hrefs, vistos = [], set()
         for p in posts:
             href = p.get_attribute("href") or ""
             if "/p/" in href and href not in vistos:
-                vistos.add(href); hrefs.append(href)
+                vistos.add(href)
+                hrefs.append(href)
             if len(hrefs) >= 4:
                 break
 
@@ -750,7 +642,7 @@ def _extrair_data_ultimo_post_nao_fixado(driver, html: str) -> str | None:
             return None
 
         url_perfil = driver.current_url
-        datas: list[tuple[int, str]] = []
+        datas = []
 
         for idx, href in enumerate(hrefs):
             try:
@@ -758,8 +650,8 @@ def _extrair_data_ultimo_post_nao_fixado(driver, html: str) -> str | None:
                 time.sleep(2)
                 try:
                     tel = WebDriverWait(driver, 4).until(
-                        EC.presence_of_element_located(
-                            (By.CSS_SELECTOR, "time[datetime]")))
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "time[datetime]"))
+                    )
                     dt = tel.get_attribute("datetime")
                     if dt:
                         datas.append((idx, dt[:10]))
@@ -767,7 +659,7 @@ def _extrair_data_ultimo_post_nao_fixado(driver, html: str) -> str | None:
                 except Exception:
                     pass
                 ph = driver.page_source
-                m  = re.search(r'datetime="(\d{4}-\d{2}-\d{2})', ph)
+                m = re.search(r'datetime="(\d{4}-\d{2}-\d{2})', ph)
                 if m:
                     datas.append((idx, m.group(1)))
             except Exception:
@@ -781,11 +673,10 @@ def _extrair_data_ultimo_post_nao_fixado(driver, html: str) -> str | None:
         if len(datas) == 1:
             return datas[0][1]
 
-        data_post1    = datas[0][1]
-        datas_outros  = [d for i, d in datas if i > 0]
-        mais_recente  = max(datas_outros) if datas_outros else None
+        data_post1 = datas[0][1]
+        datas_outros = [d for i, d in datas if i > 0]
+        mais_recente = max(datas_outros) if datas_outros else None
 
-        # Se algum dos posts 2-4 é mais recente, post 1 é fixado
         return mais_recente if (mais_recente and mais_recente > data_post1) else data_post1
 
     except Exception:
@@ -793,15 +684,11 @@ def _extrair_data_ultimo_post_nao_fixado(driver, html: str) -> str | None:
 
 
 def _parse_numero(s: str) -> int | None:
-    """
-    Converte strings do Instagram para inteiro.
-    "18,1 mil" → 18100, "1.200" → 1200, "5k" → 5000
-    """
     try:
-        s       = s.strip()
+        s = s.strip()
         tem_mil = "mil" in s.lower()
-        tem_k   = s.lower().endswith("k") and not tem_mil
-        s_num   = re.sub(r"(?:mil|k)", "", s, flags=re.IGNORECASE).strip()
+        tem_k = s.lower().endswith("k") and not tem_mil
+        s_num = re.sub(r"(?:mil|k)", "", s, flags=re.IGNORECASE).strip()
         if tem_mil or tem_k:
             s_num = s_num.replace(".", "").replace(",", ".")
             try:
@@ -810,44 +697,35 @@ def _parse_numero(s: str) -> int | None:
                 m = re.search(r"\d+", s_num)
                 valor = float(m.group()) if m else 0.0
             return int(round(valor * 1000))
-        else:
-            return int(s_num.replace(".", "").replace(",", ""))
+        return int(s_num.replace(".", "").replace(",", ""))
     except Exception:
         return None
 
 
 def _extrair_ig_do_site(site_url: str, nome: str, cidade: str) -> str | None:
-    """Extrai handle de Instagram do HTML do site (sem Selenium)."""
     try:
         r = requests.get(site_url, headers=HEADERS, timeout=TIMEOUT_PAGINA)
         if r.status_code != 200:
             return None
         handles = []
-        for m in re.finditer(
-                r'instagram\.com/([a-zA-Z0-9_\.]{3,30})/?', r.text):
+        for m in re.finditer(r'instagram\.com/([a-zA-Z0-9_\.]{3,30})/?', r.text):
             h = m.group(1).lower()
             if h not in IGNORAR_IG and h not in handles:
                 handles.append(h)
         if handles:
-            return max(handles,
-                       key=lambda h: _pontuar_ig(h, nome, cidade, "site_html"))
+            return max(handles, key=lambda h: _pontuar_ig(h, nome, cidade, "site_html"))
     except Exception:
         pass
     return None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DESCOBERTA DE SITE
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _descobrir_site(driver, nome: str, cidade: str, log) -> dict:
-    # v11.1: usa _cidade_query para corrigir SP/RJ na query
     query = f"{nome} {_cidade_query(cidade)} imobiliária"
-    log(f"  🌐 Buscando site: {query}")
-    urls = _buscar_google(driver, query)
+    log(f"  🌐 Buscando site no DuckDuckGo: {query}")
+    urls = _buscar_duckduckgo(driver, query)
 
     candidatos_site = []
-    handles_ig      = []
+    handles_ig = []
 
     for url in urls:
         score = _pontuar_site(url, nome, cidade)
@@ -861,17 +739,19 @@ def _descobrir_site(driver, nome: str, cidade: str, log) -> dict:
             continue
         candidatos_site.append({"url": url, "score": score})
 
-    aprovados = sorted([c for c in candidatos_site if c["score"] > 0],
-                       key=lambda x: -x["score"])
+    aprovados = sorted([c for c in candidatos_site if c["score"] > 0], key=lambda x: -x["score"])
 
     if not aprovados:
         log("    → sem candidatos de site com score > 0")
-        return {"url": None, "sem_site": True,
-                "ig_dos_resultados": handles_ig,
-                "ig_do_site_validado": None,
-                "site_score": 0, "site_sinais": []}
+        return {
+            "url": None,
+            "sem_site": True,
+            "ig_dos_resultados": handles_ig,
+            "ig_do_site_validado": None,
+            "site_score": 0,
+            "site_sinais": [],
+        }
 
-    # v11.1: top 2 candidatos
     for cand in aprovados[:MAX_TENTATIVAS_SITE]:
         url = cand["url"]
         log(f"    → verificando: {url[:55]} (score_url={cand['score']})")
@@ -879,52 +759,41 @@ def _descobrir_site(driver, nome: str, cidade: str, log) -> dict:
         log(f"    {'✅' if v['ok'] else '❌'} {v['motivo']}")
 
         if v["ok"]:
-            ig_validado = v.get("ig_link")  # IG encontrado no HTML do site
+            ig_validado = v.get("ig_link")
             if ig_validado:
                 log(f"    🔗 IG encontrado no site: @{ig_validado}")
             return {
-                "url":                  url,
-                "sem_site":             False,
-                "ig_dos_resultados":    handles_ig,
-                "ig_do_site_validado":  ig_validado,
-                "site_score":           v["score"],
-                "site_sinais":          v["sinais_fortes"],
+                "url": url,
+                "sem_site": False,
+                "ig_dos_resultados": handles_ig,
+                "ig_do_site_validado": ig_validado,
+                "site_score": v["score"],
+                "site_sinais": v["sinais_fortes"],
             }
 
-    return {"url": None, "sem_site": True,
-            "ig_dos_resultados": handles_ig,
-            "ig_do_site_validado": None,
-            "site_score": 0, "site_sinais": []}
+    return {
+        "url": None,
+        "sem_site": True,
+        "ig_dos_resultados": handles_ig,
+        "ig_do_site_validado": None,
+        "site_score": 0,
+        "site_sinais": [],
+    }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DESCOBERTA DE INSTAGRAM
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _descobrir_instagram(driver, nome: str, cidade: str,
-                          site_url: str,
-                          ig_do_site_validado: str,
-                          ig_dos_resultados: list,
-                          log) -> dict:
-    """
-    v11.1 — Hierarquia de origens com pesos diferentes:
-      site_validado > site_html > resultado_site > google_ig
-    Instagram vindo só do Google exige reciprocidade para aprovar.
-    """
-    log(f"  📸 Buscando Instagram...")
+def _descobrir_instagram(driver, nome: str, cidade: str, site_url: str,
+                         ig_do_site_validado: str, ig_dos_resultados: list, log) -> dict:
+    log("  📸 Buscando Instagram...")
 
     candidatos = []
-    vistos     = set()
+    vistos = set()
 
-    # ── Prioridade 1: extraído do HTML do site validado (mais confiável) ──
     if ig_do_site_validado and ig_do_site_validado not in vistos:
         vistos.add(ig_do_site_validado)
         score = _pontuar_ig(ig_do_site_validado, nome, cidade, "site_validado")
-        candidatos.append({"handle": ig_do_site_validado, "score": score,
-                            "origem": "site_validado"})
+        candidatos.append({"handle": ig_do_site_validado, "score": score, "origem": "site_validado"})
         log(f"    🥇 Candidato do site validado: @{ig_do_site_validado} (score={score})")
 
-    # ── Prioridade 2: extraído via requests do HTML do site ───────────────
     if site_url:
         h = _extrair_ig_do_site(site_url, nome, cidade)
         if h and h not in vistos:
@@ -933,21 +802,17 @@ def _descobrir_instagram(driver, nome: str, cidade: str,
             candidatos.append({"handle": h, "score": score, "origem": "site_html"})
             log(f"    🥈 Candidato do HTML do site: @{h} (score={score})")
 
-    # ── Prioridade 3: apareceu nos resultados da busca de site ────────────
     for h in ig_dos_resultados:
         if h not in vistos:
             vistos.add(h)
             score = _pontuar_ig(h, nome, cidade, "resultado_site")
             candidatos.append({"handle": h, "score": score, "origem": "resultado_site"})
 
-    # ── Prioridade 4: busca direta Google (baixa confiança) ───────────────
-    # Só faz se ainda não tem candidatos suficientes de origem confiável
-    tem_origem_confiavel = any(
-        c["origem"] in ("site_validado", "site_html") for c in candidatos)
+    tem_origem_confiavel = any(c["origem"] in ("site_validado", "site_html") for c in candidatos)
 
     if not tem_origem_confiavel:
         query = f"{nome} {_cidade_query(cidade)} site:instagram.com"
-        urls  = _buscar_google(driver, query, n=10)
+        urls = _buscar_duckduckgo(driver, query, n=10)
         for url in urls:
             m = re.search(r'instagram\.com/([a-zA-Z0-9_\.]{3,30})/?', url)
             if not m:
@@ -958,78 +823,55 @@ def _descobrir_instagram(driver, nome: str, cidade: str,
             vistos.add(h)
             score = _pontuar_ig(h, nome, cidade, "google_ig")
             candidatos.append({"handle": h, "score": score, "origem": "google_ig"})
-            log(f"    🔍 Candidato Google: @{h} (score={score})")
+            log(f"    🔍 Candidato DuckDuckGo: @{h} (score={score})")
 
-    aprovados = sorted([c for c in candidatos if c["score"] > 0],
-                       key=lambda x: -x["score"])
+    aprovados = sorted([c for c in candidatos if c["score"] > 0], key=lambda x: -x["score"])
 
     if not aprovados:
         log("    → sem candidatos de Instagram com score > 0")
-        return {"url": None, "handle": None, "sem_ig": True,
-                "metodo": None, "origem": None, "motivo": "sem candidatos"}
+        return {"url": None, "handle": None, "sem_ig": True, "metodo": None, "origem": None, "motivo": "sem candidatos"}
 
-    # v11.1: top 2 candidatos
     for cand in aprovados[:MAX_TENTATIVAS_IG]:
-        h      = cand["handle"]
+        h = cand["handle"]
         origem = cand["origem"]
         log(f"    → verificando @{h} (score={cand['score']}, origem={origem})")
 
-        v = _verificar_instagram_completo(driver, h, nome, cidade,
-                                          site_url=site_url)
+        v = _verificar_instagram_completo(driver, h, nome, cidade, site_url=site_url)
 
-        seg_s  = f" | seg={v['seguidores']}"  if v.get("seguidores")  else ""
-        pos_s  = f" | posts={v['num_posts']}" if v.get("num_posts")   else ""
-        dat_s  = f" | último={v['ultimo_post']}" if v.get("ultimo_post") else ""
-        rec_s  = " | ♻️ RECÍPROCO" if v.get("reciproco") else ""
-        log(f"    {'✅' if v['aprovado'] else '❌'} {v['motivo'] or 'ok'}"
-            f"{seg_s}{pos_s}{dat_s}{rec_s}")
+        seg_s = f" | seg={v['seguidores']}" if v.get("seguidores") else ""
+        pos_s = f" | posts={v['num_posts']}" if v.get("num_posts") else ""
+        dat_s = f" | último={v['ultimo_post']}" if v.get("ultimo_post") else ""
+        rec_s = " | ♻️ RECÍPROCO" if v.get("reciproco") else ""
+        log(f"    {'✅' if v['aprovado'] else '❌'} {v['motivo'] or 'ok'}{seg_s}{pos_s}{dat_s}{rec_s}")
 
         if not v["aprovado"]:
             continue
 
-        # ── Regra de aprovação por origem ─────────────────────────────────
         reciproco = v.get("reciproco", False)
 
-        # Origens confiáveis: aprovam sem reciprocidade
-        if origem in ("site_validado", "site_html"):
-            pass  # aprovado diretamente
-
-        # resultado_site: aprovado se tem algum sinal ou reciprocidade
-        elif origem == "resultado_site":
-            pass  # aprovado (bônus já está no score)
-
-        # google_ig: exige reciprocidade
-        elif origem == "google_ig" and not reciproco:
-            log(f"    ⛔ Rejeitado — origem google_ig sem reciprocidade "
-                f"(bio não aponta para o site)")
+        if origem == "google_ig" and not reciproco:
+            log("    ⛔ Rejeitado — origem google_ig sem reciprocidade (bio não aponta para o site)")
             continue
 
-        # Aprovado!
         return {
-            "url":        f"https://www.instagram.com/{h}/",
-            "handle":     h,
-            "sem_ig":     False,
-            "metodo":     origem,
-            "origem":     origem,
-            "reciproco":  reciproco,
+            "url": f"https://www.instagram.com/{h}/",
+            "handle": h,
+            "sem_ig": False,
+            "metodo": origem,
+            "origem": origem,
+            "reciproco": reciproco,
             "seguidores": v.get("seguidores"),
-            "num_posts":  v.get("num_posts"),
+            "num_posts": v.get("num_posts"),
             "ultimo_post": v.get("ultimo_post"),
-            "semanas":    v.get("semanas"),
-            "motivo":     v.get("motivo"),
+            "semanas": v.get("semanas"),
+            "motivo": v.get("motivo"),
         }
 
-    return {"url": None, "handle": None, "sem_ig": True,
-            "metodo": None, "origem": None,
+    return {"url": None, "handle": None, "sem_ig": True, "metodo": None, "origem": None,
             "motivo": aprovados[0].get("motivo") if aprovados else None}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ORQUESTRADOR
-# ══════════════════════════════════════════════════════════════════════════════
-
-def enriquecer(driver, nome: str, cidade: str,
-               log=None) -> ResultadoEnriquecimento:
+def enriquecer(driver, nome: str, cidade: str, log=None) -> ResultadoEnriquecimento:
     def _log(msg):
         if log:
             log(msg)
@@ -1037,11 +879,11 @@ def enriquecer(driver, nome: str, cidade: str,
     r = ResultadoEnriquecimento(nome=nome, cidade=cidade)
     try:
         site = _descobrir_site(driver, nome, cidade, _log)
-        r.site_url       = site["url"]
+        r.site_url = site["url"]
         r.site_confirmado = bool(site["url"])
-        r.site_score     = site.get("site_score", 0)
-        r.site_sinais    = site.get("site_sinais", [])
-        r.sem_site       = site["sem_site"]
+        r.site_score = site.get("site_score", 0)
+        r.site_sinais = site.get("site_sinais", [])
+        r.sem_site = site["sem_site"]
         time.sleep(1)
 
         ig = _descobrir_instagram(
@@ -1051,38 +893,28 @@ def enriquecer(driver, nome: str, cidade: str,
             ig_dos_resultados=site.get("ig_dos_resultados", []),
             log=_log,
         )
-        r.instagram_url     = ig.get("url")
-        r.ig_handle         = ig.get("handle")
-        r.ig_confirmado     = bool(ig.get("url"))
-        r.ig_metodo         = ig.get("metodo")
-        r.ig_origem         = ig.get("origem")
-        r.ig_reciproco      = ig.get("reciproco", False)
-        r.ig_seguidores     = ig.get("seguidores")
-        r.ig_num_posts      = ig.get("num_posts")
-        r.ig_ultimo_post    = ig.get("ultimo_post")
-        r.ig_semanas        = ig.get("semanas")
-        r.sem_instagram     = ig.get("sem_ig", True)
+        r.instagram_url = ig.get("url")
+        r.ig_handle = ig.get("handle")
+        r.ig_confirmado = bool(ig.get("url"))
+        r.ig_metodo = ig.get("metodo")
+        r.ig_origem = ig.get("origem")
+        r.ig_reciproco = ig.get("reciproco", False)
+        r.ig_seguidores = ig.get("seguidores")
+        r.ig_num_posts = ig.get("num_posts")
+        r.ig_ultimo_post = ig.get("ultimo_post")
+        r.ig_semanas = ig.get("semanas")
+        r.sem_instagram = ig.get("sem_ig", True)
         r.motivo_rejeicao_ig = ig.get("motivo")
 
-        # ── Coleta flags de revisão manual ───────────────────────────────
         flags = []
-
-        # Site aprovado com score baixo (20-29) — borderline
         if r.site_url and r.site_score < 30:
             flags.append(f"site:score_baixo:{r.site_score}")
-
-        # Instagram: data do último post não detectada
         if r.instagram_url and r.motivo_rejeicao_ig and "revisar manualmente" in (r.motivo_rejeicao_ig or ""):
             flags.append("ig:data_nao_detectada")
-
-        # Instagram: seguidores não extraídos
         if r.instagram_url and r.ig_seguidores is None:
             flags.append("ig:seguidores_nao_verificados")
-
-        # Instagram: veio do Google sem reciprocidade (aprovado de outra forma)
         if r.instagram_url and r.ig_origem == "google_ig" and not r.ig_reciproco:
             flags.append("ig:sem_reciprocidade")
-
         r.review_flags = flags
 
     except Exception as e:
