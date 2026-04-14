@@ -270,6 +270,59 @@ def pagina_detalhe(lista_id: int):
         _tab_exportar(lista_id, lista["nome"])
 
 
+def _valor_anuncio(lead: dict) -> str:
+    google = bool(lead.get("advertise_google"))
+    meta = bool(lead.get("advertise_meta"))
+
+    if google and meta:
+        return "Sim - Google e Meta"
+    if google:
+        return "Sim - Google"
+    if meta:
+        return "Sim - Meta"
+    return "Não"
+
+
+def _normalizar_whatsapp(lead: dict) -> str:
+    raw = (
+        lead.get("whatsapp_link")
+        or lead.get("telefone_raw")
+        or lead.get("telefone")
+        or ""
+    )
+    if not raw:
+        return ""
+
+    digits = "".join(ch for ch in str(raw) if ch.isdigit())
+    if not digits:
+        return str(raw)
+
+    if digits.startswith("55"):
+        return f"https://wa.me/{digits}"
+
+    if len(digits) in (10, 11):
+        return f"https://wa.me/55{digits}"
+
+    return f"https://wa.me/{digits}"
+
+
+def _formatar_lead(lead: dict, numero: int) -> dict:
+    return {
+        "": numero,
+        "Nome da imobiliária": lead.get("nome_imobiliaria") or "",
+        "Nome do contato": "",
+        "Material de valor": "GOOGLE",
+        "Email": lead.get("email") or "",
+        "WhatsApp": _normalizar_whatsapp(lead),
+        "Cidade": lead.get("cidade") or "",
+        "Instagram": lead.get("instagram_url") or "",
+        "Site": lead.get("site_url") or "",
+        "anúncia": _valor_anuncio(lead),
+        "padrão dos imóveis": "",
+        "CNPJ": lead.get("cnpj") or "",
+        "Responsável": lead.get("responsavel_principal") or "",
+    }
+    
 def _tab_aprovados(lista_id: int):
     leads = db.get_leads_da_lista(lista_id, apenas_aprovados=True)
     if not leads:
@@ -295,7 +348,10 @@ def _tab_aprovados(lista_id: int):
                      if not l.get("advertise_meta") and not l.get("advertise_google")]
 
     st.markdown(f"**{len(filtrados)} leads**")
-    df = pd.DataFrame([_formatar_lead(l) for l in filtrados])
+    df = pd.DataFrame([
+    _formatar_lead(l, i + 1)
+    for i, l in enumerate(filtrados)
+    ])
     st.dataframe(df, use_container_width=True, hide_index=True)
 
 
@@ -342,7 +398,10 @@ def _tab_exportar(lista_id: int, nome_lista: str):
         st.warning("Sem leads aprovados para exportar.")
         return
 
-    df = pd.DataFrame([_formatar_lead(l) for l in leads])
+    df = pd.DataFrame([
+    _formatar_lead(l, i + 1)
+    for i, l in enumerate(leads)
+    ])
 
     col1, col2 = st.columns(2)
     with col1:
