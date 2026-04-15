@@ -29,11 +29,14 @@ def init_db():
             requested_quantity  INTEGER NOT NULL DEFAULT 0,
             approved_quantity   INTEGER DEFAULT 0,
             discarded_quantity  INTEGER DEFAULT 0,
+            generation_seconds  INTEGER DEFAULT NULL,
             criteria_json       TEXT DEFAULT '{}',
             source_cities_json  TEXT DEFAULT '[]',
             created_at          TEXT DEFAULT (datetime('now','localtime')),
             updated_at          TEXT DEFAULT (datetime('now','localtime'))
         );
+        -- Migração: adiciona coluna se não existir (SQLite não suporta IF NOT EXISTS em ALTER)
+        CREATE TABLE IF NOT EXISTS _dummy_migration (id INTEGER);
 
         CREATE TABLE IF NOT EXISTS leads_enriquecidos (
             id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,6 +152,11 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_leads_approved ON leads_enriquecidos(approved);
         CREATE INDEX IF NOT EXISTS idx_listas_status  ON listas(status);
         """)
+        # Migração segura: adiciona generation_seconds se ainda não existir
+        try:
+            conn.execute("ALTER TABLE listas ADD COLUMN generation_seconds INTEGER DEFAULT NULL")
+        except Exception:
+            pass  # coluna já existe
 
 
 # ══════════════════════════════════════════════════════════════════════════════

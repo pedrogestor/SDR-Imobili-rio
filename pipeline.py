@@ -29,6 +29,9 @@ def gerar_lista(
     from agents.discovery_agent import gerar_candidatos, UFS
     from agents.enrichment_agent import criar_driver, enriquecer
 
+    import time as _t
+    _inicio_geracao = _t.time()
+
     db.atualizar_lista(lista_id, {"status": "gerando"})
 
     aprovados    = 0
@@ -110,7 +113,11 @@ def gerar_lista(
             resultado = enriquecer(driver, nome, cidade, log=log)
 
             # ── Early exit: sem site → descarta imediatamente ─────────────
-            if resultado.sem_site:
+            # Exceto se o motivo foi bloqueio do Google (não descartar nesse caso)
+            google_bloqueou = (resultado.review_flags and
+                               "site:google_bloqueado" in resultado.review_flags)
+
+            if resultado.sem_site and not google_bloqueou:
                 lead_id = db.inserir_lead(lista_id, _montar_lead(
                     cand, resultado, ads=None))
                 db.atualizar_lead(lead_id, {
@@ -120,6 +127,19 @@ def gerar_lista(
                                      lista_id=lista_id)
                 descartados += 1
                 log(f"  ❌ DESCARTADO — sem site")
+                db.atualizar_lista(lista_id, {
+                    "approved_quantity": aprovados,
+                    "discarded_quantity": descartados})
+                continue
+
+            if google_bloqueou:
+                # Salva sem aprovar — fica como pendente para reprocessamento
+                lead_id = db.inserir_lead(lista_id, _montar_lead(
+                    cand, resultado, ads=None))
+                db.atualizar_lead(lead_id, {
+                    "approved": 0,
+                    "discard_reason": "google_bloqueado_revisar"})
+                log(f"  ⚠️ PENDENTE — Google bloqueou busca, revisar manualmente")
                 db.atualizar_lista(lista_id, {
                     "approved_quantity": aprovados,
                     "discarded_quantity": descartados})
@@ -151,6 +171,27 @@ def gerar_lista(
                 site_url=resultado.site_url,
                 log=log,
             )
+
+            # ── Critério eliminatório: muitos anúncios Google = fora do perfil ──
+            MAX_GOOGLE_ADS_ACEITOS = 10
+            if (ads.google_ads_active and
+                    ads.google_ads_count_estimate > MAX_GOOGLE_ADS_ACEITOS):
+                lead_id = db.inserir_lead(lista_id, _montar_lead(cand, resultado, ads))
+                motivo_g = (f"muitos_anuncios_google:"
+                            f"{ads.google_ads_count_estimate}")
+                db.atualizar_lead(lead_id, {
+                    "approved": 0, "discard_reason": motivo_g})
+                db.inserir_reprovada(nome=nome, cidade=cidade,
+                                     motivo=motivo_g, cnpj=cnpj,
+                                     instagram_handle=resultado.ig_handle,
+                                     site_url=resultado.site_url,
+                                     lista_id=lista_id)
+                descartados += 1
+                log(f"  ❌ DESCARTADO — {motivo_g} (limite: {MAX_GOOGLE_ADS_ACEITOS})")
+                db.atualizar_lista(lista_id, {
+                    "approved_quantity": aprovados,
+                    "discarded_quantity": descartados})
+                continue
 
             # Salva dados completos do candidato no banco
             lead_id = db.inserir_lead(lista_id, _montar_lead(cand, resultado, ads))
@@ -210,10 +251,12 @@ def gerar_lista(
         log(f"\n⚠️ Lista esgotada: apenas {aprovados}/{quantidade_desejada} aprovados. "
             f"{descartados} descartados.")
 
+    _segundos = int(_t.time() - _inicio_geracao)
     db.atualizar_lista(lista_id, {
         "status":             status_final,
         "approved_quantity":  aprovados,
         "discarded_quantity": descartados,
+        "generation_seconds": _segundos,
     })
 
     return {

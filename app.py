@@ -6,7 +6,8 @@ Pipeline orientado por meta: continua até N leads aprovados ou esgotamento.
 import streamlit as st
 import pandas as pd
 import io
-from datetime import date
+import time as _time
+from datetime import date, datetime as _dt
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
@@ -103,16 +104,20 @@ def pagina_criar_lista():
 
     st.subheader("⚙️ Pipeline em execução")
 
-    cnt_col1, cnt_col2, cnt_col3, cnt_col4 = st.columns(4)
+    cnt_col1, cnt_col2, cnt_col3, cnt_col4, cnt_col5 = st.columns(5)
     cnt_aprovados   = cnt_col1.empty()
     cnt_descartados = cnt_col2.empty()
     cnt_meta        = cnt_col3.empty()
     cnt_status      = cnt_col4.empty()
+    cnt_timer       = cnt_col5.empty()
 
     cnt_aprovados.metric("✅ Aprovados", 0)
     cnt_descartados.metric("❌ Descartados", 0)
     cnt_meta.metric("🎯 Meta", int(quantidade))
     cnt_status.metric("📊 Status", "Rodando")
+    cnt_timer.metric("⏱️ Tempo", "00:00")
+
+    _inicio = _time.time()
 
     log_ph = st.empty()
     logs   = []
@@ -126,6 +131,12 @@ def pagina_criar_lista():
             cnt_descartados.metric("❌ Descartados", cont["descartados"])
             faltam = max(0, int(quantidade) - cont["aprovados"])
             cnt_meta.metric("🎯 Faltam", faltam)
+            # Atualiza timer
+            elapsed = int(_time.time() - _inicio)
+            h, rem  = divmod(elapsed, 3600)
+            m, s    = divmod(rem, 60)
+            timer_str = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+            cnt_timer.metric("⏱️ Tempo", timer_str)
         except Exception:
             pass
 
@@ -140,11 +151,17 @@ def pagina_criar_lista():
     desc  = resultado.get("descartados", 0)
     stat  = resultado.get("status", "")
 
+    elapsed_final = int(_time.time() - _inicio)
+    h_f, rem_f    = divmod(elapsed_final, 3600)
+    m_f, s_f      = divmod(rem_f, 60)
+    timer_final   = f"{h_f:02d}:{m_f:02d}:{s_f:02d}" if h_f else f"{m_f:02d}:{s_f:02d}"
+
     cnt_aprovados.metric("✅ Aprovados", aprov)
     cnt_descartados.metric("❌ Descartados", desc)
     cnt_meta.metric("🎯 Faltam", max(0, int(quantidade) - aprov))
     cnt_status.metric("📊 Status",
                       "Concluída" if stat == "concluida" else "Esgotada")
+    cnt_timer.metric("⏱️ Tempo total", timer_final)
 
     if stat == "concluida":
         st.success(f"✅ Lista concluída com {aprov} leads aprovados!")
@@ -193,7 +210,7 @@ def pagina_listas():
     for lista in listas:
         status = lista.get("status", "")
         label, cor = STATUS.get(status, (status, "#6B7280"))
-        col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
+        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
         with col1:
             st.markdown(
                 f"**{lista['nome']}**  \n"
@@ -208,6 +225,8 @@ def pagina_listas():
         with col4:
             st.metric("❌ Desc.", lista.get("discarded_quantity", 0))
         with col5:
+            st.metric("⏱️ Tempo", _fmt_tempo(lista.get("generation_seconds")))
+        with col6:
             if st.button("Abrir", key=f"open_{lista['id']}",
                          use_container_width=True):
                 st.session_state.lista_detalhe_id = lista["id"]
@@ -228,11 +247,12 @@ def pagina_detalhe(lista_id: int):
 
     st.title(f"📋 {lista['nome']}")
     cont = db.contar_leads(lista_id)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("✅ Aprovados",   cont["aprovados"])
     c2.metric("❌ Descartados", cont["descartados"])
     c3.metric("📌 Pedidos",     lista.get("requested_quantity", 0))
-    c4.metric("📊 Status",      lista.get("status", "").title())
+    c4.metric("⏱️ Tempo",       _fmt_tempo(lista.get("generation_seconds")))
+    c5.metric("📊 Status",      lista.get("status", "").title())
 
     st.markdown("---")
     tab_aprov, tab_desc, tab_export = st.tabs([
@@ -253,15 +273,35 @@ def pagina_detalhe(lista_id: int):
 # HELPERS DE FORMATAÇÃO
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _fmt_tempo(segundos) -> str:
+    """Formata segundos em string legível."""
+    if not segundos:
+        return "—"
+    s = int(segundos)
+    h, rem = divmod(s, 3600)
+    m, seg  = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m {seg:02d}s"
+    return f"{seg}s"
+
+
 def _valor_anuncio(lead: dict) -> str:
-    google = bool(lead.get("advertise_google"))
-    meta   = bool(lead.get("advertise_meta"))
-    if google and meta:
-        return "Sim - Google e Meta"
-    if google:
-        return "Sim - Google"
-    if meta:
-        return "Sim - Meta"
+    google     = bool(lead.get("advertise_google"))
+    meta       = bool(lead.get("advertise_meta"))
+    google_qtd = lead.get("google_ads_count") or 0
+    meta_qtd   = lead.get("meta_ads_count") or 0
+
+    g_label = f"Sim - Google ({google_qtd} anúncio(s))" if google else None
+    m_label = f"Sim - Meta ({meta_qtd} anúncio(s))"    if meta   else None
+
+    if g_label and m_label:
+        return f"Sim - Google e Meta"
+    if g_label:
+        return g_label
+    if m_label:
+        return m_label
     return "Não"
 
 
@@ -379,15 +419,22 @@ def _tab_descartados(lista_id: int):
         return
 
     MOTIVOS_PT = {
-        "sem_site":          "Sem site",
-        "sem_instagram":     "Sem Instagram",
-        "poucos seguidores": "Poucos seguidores",
-        "poucos posts":      "Poucos posts",
-        "inativo":           "Instagram inativo",
-        "perfil privado":    "Perfil privado",
-        "perfil não existe": "Perfil não existe",
-        "nome da empresa":   "Nome ausente no perfil",
-        "data do último":    "Revisar manualmente",
+        "sem_site":                  "Sem site",
+        "sem_instagram":             "Sem Instagram",
+        "poucos seguidores":         "Poucos seguidores",
+        "poucos posts":              "Poucos posts",
+        "inativo":                   "Instagram inativo",
+        "perfil privado":            "Perfil privado",
+        "perfil não existe":         "Perfil não existe",
+        "nome da empresa":           "Nome ausente no perfil",
+        "data do último":            "Revisar manualmente",
+        "google_bloqueado":          "⚠️ Google bloqueou — revisar",
+        "cidade incorreta":          "Cidade incorreta no ativo",
+        "nome do perfil incomp":     "Nome do perfil incompatível",
+        "muitos_anuncios_google":    "🚫 Muitos anúncios Google",
+        "instagram_pulado_sem_site": "Sem site confirmado",
+        "nao_confirmado":            "Instagram não confirmado",
+        "sem_candidatos":            "Sem candidatos encontrados",
     }
 
     por_motivo: dict = {}
