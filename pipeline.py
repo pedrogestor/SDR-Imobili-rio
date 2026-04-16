@@ -8,6 +8,8 @@ Critério de esgotamento: 3 UFs consecutivas sem nenhum candidato novo elegível
 import re, time
 from typing import Callable
 import database as db
+from agents.ads_checker import verificar_anuncios
+from config import MAX_GOOGLE_ADS as MAX_GOOGLE_ADS_ACEITOS
 
 # Número de UFs consecutivas sem candidato novo antes de declarar esgotamento
 UFS_VAZIAS_PARA_ESGOTAR = 3
@@ -113,11 +115,7 @@ def gerar_lista(
             resultado = enriquecer(driver, nome, cidade, log=log)
 
             # ── Early exit: sem site → descarta imediatamente ─────────────
-            # Exceto se o motivo foi bloqueio do Google (não descartar nesse caso)
-            google_bloqueou = (resultado.review_flags and
-                               "site:google_bloqueado" in resultado.review_flags)
-
-            if resultado.sem_site and not google_bloqueou:
+            if resultado.sem_site:
                 lead_id = db.inserir_lead(lista_id, _montar_lead(
                     cand, resultado, ads=None))
                 db.atualizar_lead(lead_id, {
@@ -127,19 +125,6 @@ def gerar_lista(
                                      lista_id=lista_id)
                 descartados += 1
                 log(f"  ❌ DESCARTADO — sem site")
-                db.atualizar_lista(lista_id, {
-                    "approved_quantity": aprovados,
-                    "discarded_quantity": descartados})
-                continue
-
-            if google_bloqueou:
-                # Salva sem aprovar — fica como pendente para reprocessamento
-                lead_id = db.inserir_lead(lista_id, _montar_lead(
-                    cand, resultado, ads=None))
-                db.atualizar_lead(lead_id, {
-                    "approved": 0,
-                    "discard_reason": "google_bloqueado_revisar"})
-                log(f"  ⚠️ PENDENTE — Google bloqueou busca, revisar manualmente")
                 db.atualizar_lista(lista_id, {
                     "approved_quantity": aprovados,
                     "discarded_quantity": descartados})
@@ -165,7 +150,6 @@ def gerar_lista(
                 continue
 
             # ── Verifica anúncios pagos (só chega aqui se tem site + IG) ──
-            from agents.ads_checker import verificar_anuncios
             ads = verificar_anuncios(
                 driver, nome, cidade,
                 site_url=resultado.site_url,
@@ -173,7 +157,6 @@ def gerar_lista(
             )
 
             # ── Critério eliminatório: muitos anúncios Google = fora do perfil ──
-            MAX_GOOGLE_ADS_ACEITOS = 10
             if (ads.google_ads_active and
                     ads.google_ads_count_estimate > MAX_GOOGLE_ADS_ACEITOS):
                 lead_id = db.inserir_lead(lista_id, _montar_lead(cand, resultado, ads))

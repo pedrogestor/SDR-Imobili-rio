@@ -1,6 +1,7 @@
 """
-config.py — Configurações centralizadas do SDR Imobiliário.
-Todos os thresholds de negócio ficam aqui.
+config.py — Configurações centralizadas do SDR Imobiliário v12.
+TODOS os thresholds de negócio ficam aqui.
+Os módulos importam daqui — nunca definem valores duplicados.
 """
 
 import os
@@ -13,45 +14,21 @@ META_ACCESS_TOKEN = os.environ.get("META_TOKEN", "")
 APP_TITLE = "SDR Imobiliário"
 APP_ICON  = "🏢"
 
-# ─── REGRAS DE NEGÓCIO (configuráveis) ────────────────────────────────────────
-MIN_CITY_POPULATION          = 100_000
-MAX_WEEKS_SINCE_LAST_POST    = 8
-MAX_META_ADS                 = 8
-MAX_GOOGLE_ADS               = 15
+# ─── REGRAS DE NEGÓCIO ────────────────────────────────────────────────────────
+MIN_CITY_POPULATION       = 100_000   # habitantes mínimos para considerar cidade
+MIN_SEGUIDORES_IG         = 500       # seguidores mínimos no Instagram
+MIN_POSTS_IG              = 20        # posts mínimos no Instagram
+MAX_SEMANAS_SEM_POST      = 8         # semanas máximas desde o último post
+MAX_GOOGLE_ADS            = 10        # limite de anúncios Google (>= descarta)
 
-# Aliases legados
-LIMITE_ADS_META          = MAX_META_ADS
-LIMITE_ADS_GOOGLE        = MAX_GOOGLE_ADS
-LIMITE_INSTAGRAM_SEMANAS = MAX_WEEKS_SINCE_LAST_POST
+# ─── ESGOTAMENTO DE PIPELINE ─────────────────────────────────────────────────
+UFS_VAZIAS_PARA_ESGOTAR   = 3         # UFs consecutivas sem candidato → para
 
-# ─── DESCOBERTA ───────────────────────────────────────────────────────────────
-DISCOVERY_SEARCH_TERMS = [
-    "imobiliária {cidade}",
-    "imobiliaria {cidade}",
-    "imóveis {cidade}",
-    "imoveis {cidade}",
-    "negócios imobiliários {cidade}",
-    "corretor imóveis {cidade}",
-]
-MAX_CANDIDATES_PER_CITY   = 40
-GENERATION_BATCH_SIZE     = 5
-
-# ─── VALIDAÇÃO DE CIDADE ──────────────────────────────────────────────────────
-ENABLE_CITY_POPULATION_VALIDATION = True
-ALLOW_CITY_IF_POPULATION_UNKNOWN  = True
-
-# ─── PORTAIS ─────────────────────────────────────────────────────────────────
-ENABLE_PORTALS_CHECK = True
-
-# ─── TIMEOUTS ─────────────────────────────────────────────────────────────────
-REQUEST_TIMEOUTS = {
-    "default": 12,
-    "instagram": 15,
-    "google": 15,
-    "cnpj": 15,
-    "whatsapp": 10,
-    "site": 12,
-}
+# ─── TIMEOUTS (segundos) ─────────────────────────────────────────────────────
+TIMEOUT_HTTP              = 10        # requests padrão
+TIMEOUT_HTTP_RETRY        = 16        # requests após timeout
+TIMEOUT_SELENIUM_SITE     = 6         # Google Ads Transparency
+TIMEOUT_DDG               = 4         # espera DDG carregar
 
 # ─── CAMINHOS ─────────────────────────────────────────────────────────────────
 EXPORT_DIR = Path(__file__).parent / "exports"
@@ -96,14 +73,3 @@ CIDADES_POPULACAO: dict = {
 }
 
 CIDADES_100K: list = sorted(CIDADES_POPULACAO.keys())
-
-
-def validar_populacao_cidade(cidade: str) -> tuple:
-    """Retorna (valida: bool, populacao: int|None)."""
-    if not ENABLE_CITY_POPULATION_VALIDATION:
-        return True, None
-    cidade_norm = cidade.strip().lower()
-    for nome, pop in CIDADES_POPULACAO.items():
-        if nome.lower() == cidade_norm:
-            return pop >= MIN_CITY_POPULATION, pop
-    return ALLOW_CITY_IF_POPULATION_UNKNOWN, None

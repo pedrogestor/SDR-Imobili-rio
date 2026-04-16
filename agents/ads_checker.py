@@ -90,9 +90,9 @@ def verificar_google_ads(driver, nome: str, cidade: str,
     url = "https://adstransparency.google.com/?region=BR&domain=" + quote(dominio)
     try:
         driver.get(url)
-        time.sleep(8)
+        time.sleep(6)
         driver.execute_script("window.scrollTo(0, 300)")
-        time.sleep(1)
+        time.sleep(0.5)
         html = driver.page_source
 
         if "captcha" in html.lower():
